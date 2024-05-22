@@ -50,5 +50,5 @@ threadpoolctl
 torchvision
 typing_extensions
 uritemplate
-urllib3
+urllib3==1.26.6
 Werkzeug
