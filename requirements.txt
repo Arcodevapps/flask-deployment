@@ -47,7 +47,6 @@ scipy
 six
 sympy
 threadpoolctl
-torch
 torchvision
 typing_extensions
 uritemplate
