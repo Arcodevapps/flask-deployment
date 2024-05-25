@@ -1,121 +1,96 @@
-import json
 from io import BytesIO
 from typing import List, Tuple
 
+import numpy as np
+import onnxruntime as ort
 import requests
-import torchvision
 from flask import Flask, jsonify, request
 from PIL import Image
-from torch import argmax
-from torch import device as tdevice
-from torch import inference_mode, load, nn, softmax
-from torchvision import models, transforms
 
-# Set device
-device = "cpu"
+app = Flask(__name__)
 
-def pred_and_plot_image(
-    model: nn.Module,
-    class_names: List[str],
-    image_path: str,
-    image_size: Tuple[int, int] = (224, 224),
-    transform: torchvision.transforms = None,
-    device: tdevice = device,
-):
-   # Example of fixing the image_path variable
+# Load the ONNX model
+ort_session = ort.InferenceSession('vit_model.onnx')
+
+# Define the image transformations
+def preprocess_image(image: Image.Image, target_size: Tuple[int, int] = (224, 224)) -> np.ndarray:
+    # Resize the image
+    image = image.resize(target_size)
     
+    # Convert image to float32 and normalize
+    image = np.array(image, dtype=np.float32)
+    image /= 255.0
+    
+    # Apply normalization mean and standard deviation
+    mean = np.array([0.485, 0.456, 0.406])
+    std = np.array([0.229, 0.224, 0.225])
+    image -= mean
+    image /= std
+    
+    # Convert image to CHW format
+    image = image.transpose(2, 0, 1)
+    
+    # Add batch dimension
+    image = np.expand_dims(image, axis=0)
+    
+    return image
+
+
+def pred_and_plot_image(ort_session: ort.InferenceSession, class_names: List[str], image_path: str) -> str:
     response = requests.get(image_path)
-    response.raise_for_status()  # Raise an exception for HTTP errors
-    # Open image from content
-    
+    response.raise_for_status()
+
     try:
         image = Image.open(BytesIO(response.content))
     except Exception as e:
         print(f"Error opening image: {e}")
         return None
-    # Create transformation for image (if one doesn't exist)
-    if transform is not None:
-        image_transform = transform
-    else:
-        image_transform = transforms.Compose(
-            [
-                transforms.Resize(image_size),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-                ),
-            ]
-        )
 
-    ### Predict on image ###
-    print(type(image))  # Verify the type of img
-    print(image.size)   # Verify the size of img
-    image.show()
-    # Make sure the model is on the target device
-    
-    print("pass7")
-    # Turn on model evaluation mode and inference mode
-    model.eval()
-    with inference_mode():
-        # Transform and add an extra dimension to image (model requires samples in [batch_size, color_channels, height, width])
-        transformed_image = image_transform(image)
-        print(transformed_image.shape)
-        transformed_image=transformed_image.unsqueeze(dim=0)
-        # Make a prediction on image with an extra dimension and send it to the target device
-        target_image_pred = model(transformed_image.to(device))
+    preprocessed_image = preprocess_image(image)
+    ort_inputs = {ort_session.get_inputs()[0].name: preprocessed_image}
+    ort_outs = ort_session.run(None, ort_inputs)
+    predictions = ort_outs[0]
+    pred_label = np.argmax(predictions, axis=1)[0]
+    pred_prob = np.max(softmax(predictions, axis=1))
 
-    # Convert logits -> prediction probabilities (using torch.softmax() for multi-class classification)
-    target_image_pred_probs = softmax(target_image_pred, dim=1)
+    result = f"Pred: {class_names[pred_label]} | Prob: {pred_prob:.3f}"
+    print(result)
+    return result
 
-    # Convert prediction probabilities -> prediction labels
-    target_image_pred_label = argmax(target_image_pred_probs, dim=1)
+def softmax(x, axis=None):
+    x = x - np.max(x, axis=axis, keepdims=True)
+    x = np.exp(x)
+    return x / np.sum(x, axis=axis, keepdims=True)
 
-  
-    print(f"Pred: {class_names[target_image_pred_label]} | Prob: {target_image_pred_probs.max():.3f}")
-    return (f"Pred: {class_names[target_image_pred_label]} | Prob: {target_image_pred_probs.max():.3f}")
-#########################################################
-# 1. Get pretrained weights for ViT-Base
-pretrained_vit_weights = models.ViT_B_16_Weights.DEFAULT 
-
-# 2. Setup a ViT model instance with pretrained weights
-pretrained_vit = models.vit_b_16(weights=pretrained_vit_weights).to(device)
-
-for parameter in pretrained_vit.parameters():
-    parameter.requires_grad = False
-    
-# 4. Change the classifier head 
-class_names = ['arecanut_budroot',
-		  'healthy_arecnut',
-		  'inflorecence',
-		  'koleroga',
-		  'leafspot',
-		  'natural_aging',
-		  'suity_mold',
-		  'yellow_leaf']
-
-##################################################################
-pretrained_vit.heads = nn.Linear(in_features=768, out_features=len(class_names)).to(device)
-
-pretrained_vit.load_state_dict(load("./vit_model_state_dict.pth",map_location=tdevice('cpu')))
-
-#################################################################
-
-
-
-##############################################################
-app = Flask(__name__)
+# Define your class names
+class_names = ['Areacanut_healthy',
+'Areacanut_inflorecence',
+'Areacanut_koleroga',
+'Areacnut_natural_aging',
+'Arecanut_budroot',
+'Arecanut_leafspot',
+'Arecanut_suity_mold',
+'Arecanut_yellow_leaf',
+'Coconut_CCI_Caterpillars',
+'Coconut_WCLWD_DryingofLeaflets',
+'Coconut_WCLWD_Flaccidity',
+'Coconut_WCLWD_Yellowing',
+'Coconut_budroot',
+'Coconut_healthy_coconut',
+'Coconut_rb',
+'Coconut_whitefly']
 
 
 @app.route("/predict", methods=["POST"])
 def predict():
     data = request.get_json()
     image_path = data["image_path"]
-    
-    output = pred_and_plot_image(model=pretrained_vit, image_path=image_path, class_names=class_names)
-    
-    return jsonify(output)
+    output = pred_and_plot_image(ort_session, class_names, image_path)  # Pass image_path instead of class_names
+    return jsonify({"result": output})
 
 @app.route('/')
 def hello():
-    return "output<h1>Testing</h1>"
-    
+    return "<h1>Model is ready for prediction</h1>"
+
+if __name__ == '__main__':
+    app.run(debug=True)
